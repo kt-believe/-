@@ -1272,7 +1272,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     const loadMore = hasMore
       ? '<button class="xhs-cx-backlink" data-comment-load="' + escapeHtml(id) + '">加载下一批评论</button>' : '';
     flowEl.appendChild(elFrom('<div class="xhs-cx-fin">笔记阅读完毕 · ' + (note.images.length || 0) + ' 张图片 · ' + (note.desc ? note.desc.length : 0) + ' 字 · 评论 ' + totalTxt + ' · ' +
-      (hasMore ? '还有评论未加载（每次只请求一批，间隔 15 秒）' : '仅展示当前已加载内容') +
+      (hasMore ? '还有评论未加载（每次只请求一批，间隔 3 秒）' : '仅展示当前已加载内容') +
       (loadMore ? '<span style="display:block;margin-top:12px">' + loadMore + '</span>' : '') +
       '</div>'));
   }
@@ -2015,7 +2015,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
   function loadOneCommentBatch(noteId) {
     if (!noteId) return;
     const now = Date.now();
-    const wait = 15000 - (now - lastManualCommentLoad);
+    const wait = 3000 - (now - lastManualCommentLoad);
     if (wait > 0) {
       toast("请在 " + Math.ceil(wait / 1000) + " 秒后再加载下一批评论");
       return;
