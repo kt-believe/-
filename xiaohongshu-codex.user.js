@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书 · Codex 外观
 // @namespace    https://www.xiaohongshu.com/
-// @version      2.3.0
-// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持正文、图片灯箱和全量评论加载展示；带 xsec_token 的真实跳转、应急伪装键和设置面板。
+// @version      2.4.0
+// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持正文、图片灯箱和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
 // @author       doubao
 // @match        https://www.xiaohongshu.com/*
 // @noframes
@@ -15,8 +15,8 @@
  * 1. 数据来源：小红书当前 Web 版不一定暴露 window.__INITIAL_STATE__。
  *    因此页面 DOM 是一等数据源，state 仅作为增强回退。列表从真实笔记链接
  *    读取带 xsec_token 的 URL；详情从 #noteContainer 读取标题、正文、作者、
- *    图片与评论。评论模式会滚动原生详情容器、展开楼中楼，并旁观原页面的分页响应；
- *    不自行调用私有接口，也不伪造签名或发送额外请求。
+ *    图片与评论。评论只读取原生页已加载的内容；需要下一批时由用户手动触发一次
+ *    原生滚动，脚本不会展开楼中楼或在后台连续分页，避免触发站点限流。
  *
  * 2. 路由：
  *      /explore 或 /            → 推荐流（feed）
@@ -1051,7 +1051,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     railEl = document.createElement("aside");
     railEl.className = "xhs-cx-rail";
     railEl.innerHTML =
-      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.3.0</span></div>' +
+      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.4.0</span></div>' +
       '<button class="xhs-cx-new" id="xhs-cx-new">' + ICONS.plus + '<span>新建会话</span></button>' +
       '<div class="xhs-cx-sessions" id="xhs-cx-sessions"></div>' +
       '<div class="xhs-cx-rail-login"><button id="xhs-cx-login-btn" title="登录小红书后才能打开笔记详情">未登录 · 点击登录</button></div>' +
@@ -1263,14 +1263,17 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
       (loadedCount ? '（当前页面已加载 ' + loadedCount + ' 条' + (hasMore ? '，原生页还有更多' : '，已全部加载') + '）' : '') +
       (loginHint || '') + '</div>'));
     if (!comments.length) {
-      flowEl.appendChild(elFrom('<div class="xhs-cx-empty" style="padding:24px 20px">暂无评论' + (hasMore ? '，正在加载…' : '') + '。</div>'));
+      flowEl.appendChild(elFrom('<div class="xhs-cx-empty" style="padding:24px 20px">暂无评论' + (hasMore ? '，可手动请求下一批。' : '') + '。</div>'));
     } else {
       const box = elFrom('<div class="xhs-cx-cmts"></div>');
       comments.forEach((c) => box.appendChild(elFrom(commentHtml(c, 0))));
       flowEl.appendChild(box);
     }
+    const loadMore = hasMore
+      ? '<button class="xhs-cx-backlink" data-comment-load="' + escapeHtml(id) + '">加载下一批评论</button>' : '';
     flowEl.appendChild(elFrom('<div class="xhs-cx-fin">笔记阅读完毕 · ' + (note.images.length || 0) + ' 张图片 · ' + (note.desc ? note.desc.length : 0) + ' 字 · 评论 ' + totalTxt + ' · ' +
-      (hasMore ? '原生页面还有更多评论，滚动原页面后刷新即可读取' : '仅展示当前已加载内容') +
+      (hasMore ? '还有评论未加载（每次只请求一批，间隔 15 秒）' : '仅展示当前已加载内容') +
+      (loadMore ? '<span style="display:block;margin-top:12px">' + loadMore + '</span>' : '') +
       '</div>'));
   }
   function renderSearch(notes, kw) {
@@ -1337,30 +1340,21 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     const code = route.code ? '（error ' + escapeHtml(route.code) + '）' : '';
     let msg = route.msg || "评论接口或登录状态暂时失效";
     try { msg = decodeURIComponent(msg); } catch { /* ignore */ }
+    const isRateLimited = route.code === "300013";
     const retry = route.redirect
       ? '<a class="xhs-cx-backlink" data-nav="' + escapeHtml(route.redirect) + '">重新打开原笔记</a>' : '';
     flowEl.appendChild(elFrom(userTurn("open(\"/website-login/error\")")));
     flowEl.appendChild(elFrom('<div class="xhs-cx-empty"><div>' + ICONS.file + '</div>' +
       '小红书临时跳转到了错误页' + code + '<br>' +
-      '<span class="xhs-dim">' + escapeHtml(msg) + '。通常是评论分页令牌过期或登录状态变化。</span><br>' +
+      '<span class="xhs-dim">' + escapeHtml(msg) + (isRateLimited
+        ? '。为防止继续触发限流，脚本已停止后台评论加载。请等待至少 60 秒后，从首页重新进入笔记。'
+        : '。通常是评论分页令牌过期或登录状态变化。') + '</span><br>' +
       '<span style="display:inline-flex;gap:10px;margin-top:12px;flex-wrap:wrap">' +
       retry +
       '<a class="xhs-cx-backlink" style="background:transparent;border:1px solid var(--xhs-border);color:var(--xhs-muted)" data-nav="' + HOME + '/explore">返回首页刷新</a>' +
       (!isLoggedIn() ? '<button class="xhs-cx-backlink" data-open-login="1">重新登录</button>' : '') +
       '</span></div>'));
   }
-  function maybeRecoverWebsiteError(route) {
-    if (!route.redirect || !isLoggedIn()) return false;
-    const key = "xhs:codex:error-retry:" + location.href;
-    let last = 0;
-    try { last = Number(sessionStorage.getItem(key) || 0); } catch { /* ignore */ }
-    // 同一个错误地址只自动重试一次，避免服务端持续失败时无限跳转。
-    if (Date.now() - last < 10 * 60 * 1000) return false;
-    try { sessionStorage.setItem(key, String(Date.now())); } catch { /* ignore */ }
-    location.replace(route.redirect);
-    return true;
-  }
-
   function elFrom(html) {
     const t = document.createElement("div");
     t.innerHTML = html;
@@ -1480,7 +1474,6 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     document.documentElement.classList.remove("xhs-cx-boot");
     applyTitle();
     const { route, notes, detail, comments, commentCount, hasMore } = pageData();
-    if (route.kind === "error" && maybeRecoverWebsiteError(route)) return;
     // 详情页切「覆盖层模式」：原生页保留布局可真实滚动（评论懒加载依赖），Codex 不透明覆盖
     document.documentElement.classList.toggle("xhs-cx-overlay", route.kind === "detail");
     if (route.kind === "detail") {
@@ -1503,7 +1496,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     renderPanel(notes);
     updateLoginUI();
     flowEl.innerHTML = "";
-    if (route.kind === "detail") { startCommentPump(route.id); renderDetail(detail, comments, commentCount, hasMore); }
+    if (route.kind === "detail") { stopCommentPump(); renderDetail(detail, comments, commentCount, hasMore); }
     else { stopCommentPump(); if (route.kind === "search") renderSearch(notes, route.kw);
       else if (route.kind === "profile") renderProfile(notes);
       else if (route.kind === "feed") renderFeed(notes);
@@ -1745,7 +1738,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     settingsEl.innerHTML =
       '<div class="xhs-cx-settings-card">' +
         '<h3>Codex 外观设置</h3>' +
-        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.3.0 — 评论由原生页面完整加载</div>' +
+        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.4.0 — 评论按需、受控加载</div>' +
         '<div class="xhs-cx-row"><label>主题</label><select id="s-theme">' +
           '<option value="dark">深色</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></div>' +
         '<div class="xhs-cx-row"><label>伪装（Codex 品牌 / 标题 / 图标）</label><input type="checkbox" id="s-stealth"></div>' +
@@ -1821,6 +1814,12 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     document.addEventListener("click", (e) => {
       const lb = e.target.closest && e.target.closest("[data-lb]");
       if (lb) { openLightbox(lb.getAttribute("data-lb")); return; }
+      const commentLoad = e.target.closest && e.target.closest("[data-comment-load]");
+      if (commentLoad) {
+        e.preventDefault();
+        loadOneCommentBatch(commentLoad.getAttribute("data-comment-load") || "");
+        return;
+      }
       const lg = e.target.closest && e.target.closest("[data-open-login]");
       if (lg) { openLogin(); return; }
       const nav = e.target.closest && e.target.closest("[data-nav]");
@@ -2004,99 +2003,45 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
       }
     } catch { /* ignore */ }
   }
-  let pumpTimer = null, pumpNoteId = "", pumpDone = false;
+  let pumpTimer = null, pumpNoteId = "";
   function stopCommentPump() {
     if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = null; }
   }
   /**
-   * 详情页后台加载全部评论（覆盖层模式，慢速渐进滚动）。
-   * 实测（2026-09 小红书 web）：评论区会周期性「重挂载」（列表瞬时归零再恢复），
-   * 分页加载需要像真人一样小步慢滚、且有 10 秒级延迟——猛滚/快速放弃都无效。
-   * 因此：每轮把窗口滚到评论区顶部、容器分 6 小步滚到底；轮询间隔 4s、
-   * 最多 40 轮（约 2.5 分钟）；用「历史最大条数」衡量进展，瞬时归零不计入停滞。
-   * 评论数据由 SPA 自己拉取（走站点私有通道），脚本只触发滚动 + 读 state 重渲。
+   * 用户主动请求一批评论。只滚动一次原生评论容器，不点击“展开回复”、不循环、
+   * 不直接请求私有接口；这样由站点决定是否分页，并避免 300013 访问频繁。
    */
-  function startCommentPump(noteId) {
+  let lastManualCommentLoad = 0;
+  function loadOneCommentBatch(noteId) {
     if (!noteId) return;
-    if (pumpNoteId === noteId && (pumpTimer || pumpDone)) return;
-    pumpNoteId = noteId; pumpDone = false;
-    let rounds = 0, noGrow = 0, maxLen = -1, lastShown = -1;
-    const loadedLen = () => {
-      // 新版 Web 通常没有 __INITIAL_STATE__；DOM 是评论数量的主信号。
-      let len = 0;
-      try {
-        const st = getState();
-        const b = st && detailBundle(st, noteId);
-        if (b) len = Math.max(len, b.comments.length);
-      } catch { /* ignore */ }
-      try {
-        const cm = domComments();
-        len = Math.max(len, cm.loaded || countCommentTree(cm.comments));
-      } catch { /* ignore */ }
-      return len;
-    };
-    const expectedTotal = () => {
-      let total = 0;
-      try { total = Math.max(total, Number(window.__xhsCxComments?.[noteId]?.totalCount) || 0); } catch { /* ignore */ }
-      try {
-        const b = detailBundle(getState(), noteId);
-        total = Math.max(total, Number(b && b.commentCount) || 0);
-      } catch { /* ignore */ }
-      try { total = Math.max(total, Number(domComments().count) || 0); } catch { /* ignore */ }
-      return total;
-    };
-    const rerender = () => {
+    const now = Date.now();
+    const wait = 15000 - (now - lastManualCommentLoad);
+    if (wait > 0) {
+      toast("请在 " + Math.ceil(wait / 1000) + " 秒后再加载下一批评论");
+      return;
+    }
+    lastManualCommentLoad = now;
+    pumpNoteId = noteId;
+    try {
+      const nc = document.querySelector("#noteContainer");
+      const inner = nc && nc.querySelector(".note-scroller");
+      const scroller = inner && inner.scrollHeight > inner.clientHeight ? inner : nc;
+      if (!scroller) { toast("原生评论区尚未准备好，请稍后重试"); return; }
+      const target = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTop = target;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      toast("已请求一批评论，正在等待小红书页面返回…");
+    } catch { toast("无法滚动原生评论区，请刷新笔记后重试"); return; }
+    // 只在本次用户操作后读一次结果；不会继续触发分页。
+    stopCommentPump();
+    pumpTimer = setTimeout(() => {
+      pumpTimer = null;
       try {
         const sc = scrollEl, sp = sc ? sc.scrollTop : 0;
         render();
         if (sc) sc.scrollTop = sp;
       } catch { /* ignore */ }
-    };
-    const finish = (loggedOut) => {
-      pumpDone = true;
-      stopCommentPump();
-      rerender();
-      if (loggedOut) toast("未登录仅显示部分评论，登录后可查看全部");
-    };
-    const round = () => {
-      if (pumpNoteId !== noteId) return;
-      rounds++;
-      // 先展开已出现的楼中楼入口。覆盖层不会阻止 DOM click() 触发 Vue 事件。
-      try {
-        const expands = Array.from(document.querySelectorAll("#noteContainer .show-more"))
-          .filter((el) => isVisible(el) && /展开|更多回复/.test(txt(el)));
-        expands.slice(0, 12).forEach((el) => { try { el.click(); } catch { /* ignore */ } });
-      } catch { /* ignore */ }
-      // 详情弹层真正的分页监听容器是 .note-scroller；不能按滚动高度猜测，
-      // 否则会误选背后的 feed/document.scrollingElement，永远停在首批 10 条。
-      try {
-        const nc = document.querySelector("#noteContainer");
-        if (nc) {
-          const inner = nc.querySelector(".note-scroller");
-          const scroller = inner && inner.scrollHeight > inner.clientHeight ? inner : nc;
-          if (scroller) {
-            const target = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-            scroller.scrollTop = target;
-            scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
-          }
-        } else {
-          window.scrollTo(0, document.body.scrollHeight);
-        }
-      } catch { /* ignore */ }
-      // 用「历史最大值」衡量进展；瞬时归零（评论区重挂载）不计入停滞
-      const len = loadedLen();
-      if (len > maxLen) { maxLen = len; noGrow = 0; }
-      else if (len > 0) { noGrow++; }
-      if (maxLen > lastShown) {
-        lastShown = maxLen;
-        rerender(); // 有新评论才重渲，避免打扰
-      }
-      // 已到服务端声明的总数即完成；没有总数时，连续多轮无新增再停止。
-      const total = expectedTotal();
-      if ((total && len >= total) || noGrow >= 8) { finish(false); return; }
-      pumpTimer = setTimeout(round, 3000);
-    };
-    pumpTimer = setTimeout(round, 2000);
+    }, 2200);
   }
 
   function bootstrap() {
