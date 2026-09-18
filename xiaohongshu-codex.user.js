@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书 · Codex 外观
 // @namespace    https://www.xiaohongshu.com/
-// @version      2.2.0
+// @version      2.3.0
 // @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持正文、图片灯箱和全量评论加载展示；带 xsec_token 的真实跳转、应急伪装键和设置面板。
 // @author       doubao
 // @match        https://www.xiaohongshu.com/*
@@ -207,6 +207,16 @@
       return { kind: "search", kw: kw };
     }
     if (/^\/user\/profile\//.test(p)) return { kind: "profile" };
+    // 评论/子接口失败时，小红书会跳到 /website-login/error，并把原笔记放在 redirectPath。
+    if (/^\/website-login\/error/.test(p)) {
+      let code = "", msg = "";
+      try {
+        const sp = new URLSearchParams(location.search);
+        code = sp.get("error_code") || "";
+        msg = sp.get("error_msg") || "";
+      } catch { /* ignore */ }
+      return { kind: "error", redirect: getRedirectPath(), code, msg };
+    }
     return { kind: "other" };
   }
   function normFromCard(nc, fallbackId, token) {
@@ -1041,7 +1051,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     railEl = document.createElement("aside");
     railEl.className = "xhs-cx-rail";
     railEl.innerHTML =
-      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.2.0</span></div>' +
+      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.3.0</span></div>' +
       '<button class="xhs-cx-new" id="xhs-cx-new">' + ICONS.plus + '<span>新建会话</span></button>' +
       '<div class="xhs-cx-sessions" id="xhs-cx-sessions"></div>' +
       '<div class="xhs-cx-rail-login"><button id="xhs-cx-login-btn" title="登录小红书后才能打开笔记详情">未登录 · 点击登录</button></div>' +
@@ -1323,6 +1333,33 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     }
     flowEl.appendChild(elFrom('<div class="xhs-cx-empty"><div>' + ICONS.file + '</div>当前页面不在伪装范围内（仅接管 feed / 笔记 / 搜索 / 主页）。<br><span class="xhs-dim">外壳与应急伪装键仍然可用。</span></div>'));
   }
+  function renderWebsiteError(route) {
+    const code = route.code ? '（error ' + escapeHtml(route.code) + '）' : '';
+    let msg = route.msg || "评论接口或登录状态暂时失效";
+    try { msg = decodeURIComponent(msg); } catch { /* ignore */ }
+    const retry = route.redirect
+      ? '<a class="xhs-cx-backlink" data-nav="' + escapeHtml(route.redirect) + '">重新打开原笔记</a>' : '';
+    flowEl.appendChild(elFrom(userTurn("open(\"/website-login/error\")")));
+    flowEl.appendChild(elFrom('<div class="xhs-cx-empty"><div>' + ICONS.file + '</div>' +
+      '小红书临时跳转到了错误页' + code + '<br>' +
+      '<span class="xhs-dim">' + escapeHtml(msg) + '。通常是评论分页令牌过期或登录状态变化。</span><br>' +
+      '<span style="display:inline-flex;gap:10px;margin-top:12px;flex-wrap:wrap">' +
+      retry +
+      '<a class="xhs-cx-backlink" style="background:transparent;border:1px solid var(--xhs-border);color:var(--xhs-muted)" data-nav="' + HOME + '/explore">返回首页刷新</a>' +
+      (!isLoggedIn() ? '<button class="xhs-cx-backlink" data-open-login="1">重新登录</button>' : '') +
+      '</span></div>'));
+  }
+  function maybeRecoverWebsiteError(route) {
+    if (!route.redirect || !isLoggedIn()) return false;
+    const key = "xhs:codex:error-retry:" + location.href;
+    let last = 0;
+    try { last = Number(sessionStorage.getItem(key) || 0); } catch { /* ignore */ }
+    // 同一个错误地址只自动重试一次，避免服务端持续失败时无限跳转。
+    if (Date.now() - last < 10 * 60 * 1000) return false;
+    try { sessionStorage.setItem(key, String(Date.now())); } catch { /* ignore */ }
+    location.replace(route.redirect);
+    return true;
+  }
 
   function elFrom(html) {
     const t = document.createElement("div");
@@ -1340,6 +1377,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
         detail: "~ /discovery/item/" + (r.id || "") + " — 笔记详情",
         search: "~ /search_result?keyword=" + (r.kw || "") + " — 搜索",
         profile: "~ /user/profile — 用户主页",
+        error: "~ /website-login/error — 页面恢复",
         other: "~ " + location.pathname
       };
       crumb.innerHTML = '~/workspace <b>·</b> ' + escapeHtml(map[r.kind] || map.other);
@@ -1442,6 +1480,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     document.documentElement.classList.remove("xhs-cx-boot");
     applyTitle();
     const { route, notes, detail, comments, commentCount, hasMore } = pageData();
+    if (route.kind === "error" && maybeRecoverWebsiteError(route)) return;
     // 详情页切「覆盖层模式」：原生页保留布局可真实滚动（评论懒加载依赖），Codex 不透明覆盖
     document.documentElement.classList.toggle("xhs-cx-overlay", route.kind === "detail");
     if (route.kind === "detail") {
@@ -1468,6 +1507,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     else { stopCommentPump(); if (route.kind === "search") renderSearch(notes, route.kw);
       else if (route.kind === "profile") renderProfile(notes);
       else if (route.kind === "feed") renderFeed(notes);
+      else if (route.kind === "error") renderWebsiteError(route);
       else renderOther(); }
     lastSig = routeSig();
     if (scrollEl) scrollEl.scrollTop = 0;
@@ -1705,7 +1745,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     settingsEl.innerHTML =
       '<div class="xhs-cx-settings-card">' +
         '<h3>Codex 外观设置</h3>' +
-        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.2.0 — 评论由原生页面完整加载</div>' +
+        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.3.0 — 评论由原生页面完整加载</div>' +
         '<div class="xhs-cx-row"><label>主题</label><select id="s-theme">' +
           '<option value="dark">深色</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></div>' +
         '<div class="xhs-cx-row"><label>伪装（Codex 品牌 / 标题 / 图标）</label><input type="checkbox" id="s-stealth"></div>' +
@@ -2086,7 +2126,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     applyVisual();
     const tryRender = () => {
       const d = pageData();
-      if (d.notes.length || d.route.kind === "other") { render(); return true; }
+      if (d.notes.length || d.route.kind === "other" || d.route.kind === "error") { render(); return true; }
       return false;
     };
     let tries = 0;
