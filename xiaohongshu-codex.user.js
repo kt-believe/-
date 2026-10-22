@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书 · Codex 外观
 // @namespace    https://www.xiaohongshu.com/
-// @version      2.5.2
-// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持全部主图、评论图片灯箱和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
+// @version      2.6.0
+// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持图片灯箱、列表位置恢复、分批加载和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
 // @author       doubao
 // @match        https://www.xiaohongshu.com/*
 // @noframes
@@ -54,6 +54,8 @@
     favicon: "codex"        // "codex" | "site"
   };
   const SETTINGS_KEY = "xhs:codex:settings";
+  const LIST_VIEW_KEY = "xhs:codex:list-view:v1";
+  const LIST_PAGE_SIZE = 30;
   let SETTINGS = null;
 
   function loadSettings() {
@@ -109,6 +111,29 @@
   let bossTimer = null, bossIdx = 0, bossTick = null;
   let lastEscAt = 0;
   let toasts = null;
+  let lastRenderRouteKey = "";
+  let pendingScrollRestore = null;
+
+  function listRouteKey(route) {
+    return (route && route.kind ? route.kind : "other") + "|" + location.pathname + location.search;
+  }
+  function readListView(route) {
+    try {
+      const raw = sessionStorage.getItem(LIST_VIEW_KEY);
+      const value = raw ? JSON.parse(raw) : null;
+      return value && value.key === listRouteKey(route) ? value : null;
+    } catch { return null; }
+  }
+  function saveListView(route, visible, scrollTop) {
+    if (!route || !["feed", "search", "profile"].includes(route.kind)) return;
+    try {
+      sessionStorage.setItem(LIST_VIEW_KEY, JSON.stringify({
+        key: listRouteKey(route),
+        visible: Math.max(LIST_PAGE_SIZE, Number(visible) || LIST_PAGE_SIZE),
+        scrollTop: Math.max(0, Number(scrollTop) || 0)
+      }));
+    } catch { /* ignore */ }
+  }
 
   /* ============================== 内联 SVG ============================== */
   const ICONS = {
@@ -1111,7 +1136,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     railEl = document.createElement("aside");
     railEl.className = "xhs-cx-rail";
     railEl.innerHTML =
-      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.5.2</span></div>' +
+      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.6.0</span></div>' +
       '<button class="xhs-cx-new" id="xhs-cx-new">' + ICONS.plus + '<span>新建会话</span></button>' +
       '<div class="xhs-cx-sessions" id="xhs-cx-sessions"></div>' +
       '<div class="xhs-cx-rail-login"><button id="xhs-cx-login-btn" title="登录小红书后才能打开笔记详情">未登录 · 点击登录</button></div>' +
@@ -1286,9 +1311,12 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
 
   /* —— 各路由渲染 —— */
   function renderFeed(notes, subtitle) {
+    const route = currentRoute();
+    const saved = readListView(route);
+    const visible = Math.max(LIST_PAGE_SIZE, Number(saved && saved.visible) || LIST_PAGE_SIZE);
     flowEl.appendChild(elFrom(userTurn(subtitle || "fetch(\"/explore\")")));
     flowEl.appendChild(elFrom(thinkHtml("feed-" + routeSig(), "推荐流")));
-    flowEl.appendChild(elFrom(toolLine("browse_feed", '{ page: 1, size: ' + Math.min(notes.length, 30) + ' }')));
+    flowEl.appendChild(elFrom(toolLine("browse_feed", '{ page: 1, size: ' + Math.min(notes.length, visible) + ' }')));
     if (!notes.length) {
       flowEl.appendChild(elFrom('<div class="xhs-cx-empty"><div>' + ICONS.file + '</div>没有解析到笔记数据。<br><span class="xhs-dim">可能未登录或页面结构已变更，可尝试刷新。</span></div>'));
       return;
@@ -1301,13 +1329,16 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
         ? '<br><span style="color:#e0a45c">⚠ 未登录：笔记详情会被小红书拦截（error 300031），请先在左下角登录。</span>'
         : "") +
       '</div>'));
-    const list = notes.slice(0, 30);
+    const list = notes.slice(0, visible);
     list.forEach((n) => {
       if (traceOn(n.id)) flowEl.appendChild(elFrom(thinkHtml(n.id, n.title)));
       flowEl.appendChild(elFrom(toolLine("search_notes", '{ query: "' + short(n.title, 14) + '", limit: 1 }')));
       flowEl.appendChild(elFrom(noteCardHtml(n)));
     });
-    flowEl.appendChild(elFrom('<div class="xhs-cx-fin">完成 · ' + list.length + ' 条 · ' + (Math.random() * 1.5 + 0.8).toFixed(1) + 's</div>'));
+    const more = notes.length > list.length
+      ? '<span style="display:block;margin-top:12px"><button class="xhs-cx-backlink" data-list-load="1">加载更多（再显示 ' + Math.min(LIST_PAGE_SIZE, notes.length - list.length) + ' 条）</button></span>'
+      : '';
+    flowEl.appendChild(elFrom('<div class="xhs-cx-fin">完成 · ' + list.length + ' / ' + notes.length + ' 条 · ' + (Math.random() * 1.5 + 0.8).toFixed(1) + 's' + more + '</div>'));
   }
   function renderDetail(note, comments, commentCount, hasMore) {
     const id = note ? note.id : (currentRoute().id || "");
@@ -1539,6 +1570,12 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     document.documentElement.classList.remove("xhs-cx-boot");
     applyTitle();
     const { route, notes, detail, comments, commentCount, hasMore } = pageData();
+    const routeKey = listRouteKey(route);
+    const routeChanged = routeKey !== lastRenderRouteKey;
+    if (routeChanged) {
+      const saved = readListView(route);
+      pendingScrollRestore = saved ? saved.scrollTop : 0;
+    }
     // 详情页切「覆盖层模式」：原生页保留布局可真实滚动（评论懒加载依赖），Codex 不透明覆盖
     document.documentElement.classList.toggle("xhs-cx-overlay", route.kind === "detail");
     if (route.kind === "detail") {
@@ -1568,7 +1605,12 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
       else if (route.kind === "error") renderWebsiteError(route);
       else renderOther(); }
     lastSig = routeSig();
-    if (scrollEl) scrollEl.scrollTop = 0;
+    if (scrollEl && pendingScrollRestore !== null) {
+      const restoreTop = pendingScrollRestore;
+      pendingScrollRestore = null;
+      requestAnimationFrame(() => { if (scrollEl) scrollEl.scrollTop = restoreTop; });
+    }
+    lastRenderRouteKey = routeKey;
     started = true;
   }
   let renderTimer = null;
@@ -1803,7 +1845,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     settingsEl.innerHTML =
       '<div class="xhs-cx-settings-card">' +
         '<h3>Codex 外观设置</h3>' +
-        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.5.2 — 图片精确去重，评论按需加载</div>' +
+        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.6.0 — 列表位置恢复，评论按需加载</div>' +
         '<div class="xhs-cx-row"><label>主题</label><select id="s-theme">' +
           '<option value="dark">深色</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></div>' +
         '<div class="xhs-cx-row"><label>伪装（Codex 品牌 / 标题 / 图标）</label><input type="checkbox" id="s-stealth"></div>' +
@@ -1885,6 +1927,18 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
         loadOneCommentBatch(commentLoad.getAttribute("data-comment-load") || "");
         return;
       }
+      const listLoad = e.target.closest && e.target.closest("[data-list-load]");
+      if (listLoad) {
+        e.preventDefault();
+        const route = currentRoute();
+        const saved = readListView(route);
+        const visible = Math.max(LIST_PAGE_SIZE, Number(saved && saved.visible) || LIST_PAGE_SIZE) + LIST_PAGE_SIZE;
+        const top = scrollEl ? scrollEl.scrollTop : 0;
+        saveListView(route, visible, top);
+        pendingScrollRestore = top;
+        render();
+        return;
+      }
       const lg = e.target.closest && e.target.closest("[data-open-login]");
       if (lg) { openLogin(); return; }
       const nav = e.target.closest && e.target.closest("[data-nav]");
@@ -1894,6 +1948,11 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
         // 始终直接跳转对应笔记详情；未登录时不拦截（否则所有笔记都会卡在同一个登录弹窗），
         // 仅作非阻断提示。若未登录导致 404，详情页的兜底会给出「去登录」引导。
         const isNote = url.indexOf("/discovery/item/") > -1 || /\/explore\/[0-9a-zA-Z]+/.test(url);
+        if (isNote) {
+          const route = currentRoute();
+          const saved = readListView(route);
+          saveListView(route, Number(saved && saved.visible) || LIST_PAGE_SIZE, scrollEl ? scrollEl.scrollTop : 0);
+        }
         if (isNote && !isLoggedIn()) {
           toast("未登录，笔记详情可能被拦截（打不开时点左下角登录）");
         }
