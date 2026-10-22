@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书 · Codex 外观
 // @namespace    https://www.xiaohongshu.com/
-// @version      2.4.0
-// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持正文、图片灯箱和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
+// @version      2.5.0
+// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持全部主图、评论图片灯箱和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
 // @author       doubao
 // @match        https://www.xiaohongshu.com/*
 // @noframes
@@ -184,7 +184,46 @@
   }
   function imgUrl(u) {
     if (!u) return "";
-    return String(u).replace(/^http:\/\//i, "https://");
+    const s = String(u).trim();
+    if (!s || /^data:/i.test(s)) return "";
+    return s.replace(/^\/\//, "https://").replace(/^http:\/\//i, "https://");
+  }
+  /** 小红书图片会在 src、data-src、srcset 或 Vue 的懒加载属性间切换；统一取候选。 */
+  function imageCandidates(node) {
+    if (!node) return [];
+    const attrs = ["currentSrc", "src", "data-src", "data-origin", "data-original", "data-url", "data-image", "data-lazy-src", "data-raw", "href"];
+    const out = [];
+    const add = (value) => {
+      if (!value) return;
+      String(value).split(",").forEach((part) => {
+        const url = imgUrl(part.trim().split(/\s+/)[0]);
+        if (url && !out.includes(url)) out.push(url);
+      });
+    };
+    for (const key of attrs) {
+      try { add(key in node ? node[key] : node.getAttribute && node.getAttribute(key)); } catch { /* ignore */ }
+    }
+    try { add(node.getAttribute && node.getAttribute("srcset")); } catch { /* ignore */ }
+    return out;
+  }
+  function imageListFrom(value, depth) {
+    const out = [], seen = new Set();
+    const add = (u) => {
+      const url = imgUrl(u);
+      // 只按原始文件路径去重，保留同一图片不同 CDN 参数时的第一份。
+      const key = url.replace(/[?#].*$/, "");
+      if (url && !seen.has(key)) { seen.add(key); out.push(url); }
+    };
+    const walk = (node, d) => {
+      if (!node || d > (depth || 4)) return;
+      if (typeof node === "string") { add(node); return; }
+      if (Array.isArray(node)) { node.forEach((x) => walk(x, d + 1)); return; }
+      if (typeof node !== "object") return;
+      ["urlDefault", "urlPre", "url", "src", "originUrl", "originalUrl", "imageUrl", "image_url", "masterUrl"].forEach((k) => add(node[k]));
+      ["imageList", "image_list", "images", "pictures", "pictureList", "imageInfo", "image_info", "image", "urlInfoList", "url_info_list"].forEach((k) => walk(node[k], d + 1));
+    };
+    walk(value, 0);
+    return out;
   }
 
   /* ============================== 读取页面数据 ============================== */
@@ -260,9 +299,7 @@
     if (!id) return null;
     const u = note.user || {};
     const it = note.interactInfo || {};
-    let imgs = Array.isArray(note.imageList)
-      ? note.imageList.map((x) => imgUrl((x && (x.urlDefault || x.urlPre)) || "")).filter(Boolean)
-      : [];
+    let imgs = imageListFrom(note.imageList || note.images || note.image_list || note, 5);
     // 视频笔记没有 imageList，用封面当首图
     if (!imgs.length && note.video && note.video.cover && note.video.cover.urlDefault) {
       imgs = [imgUrl(note.video.cover.urlDefault)];
@@ -373,9 +410,12 @@
     const images = [];
     const seen = new Set();
     // Swiper 为无缝轮播复制首尾图片，按 URL 去重并跳过头像/评论图片。
-    box.querySelectorAll(".media-container .swiper-slide:not(.swiper-slide-duplicate) img, .media-container img").forEach((img) => {
-      const url = imgUrl(img.currentSrc || img.getAttribute("src") || "");
-      if (url && !seen.has(url)) { seen.add(url); images.push(url); }
+    box.querySelectorAll(".media-container img, .note-slider img, .swiper img").forEach((img) => {
+      if (img.closest(".author, .comments-container")) return;
+      imageCandidates(img).forEach((url) => {
+        const key = url.replace(/[?#].*$/, "");
+        if (!seen.has(key)) { seen.add(key); images.push(url); }
+      });
     });
     const tags = Array.from(box.querySelectorAll(".detail-desc #hash-tag, .note-content .tag"))
       .map((el) => txt(el).replace(/^#/, "")).filter(Boolean);
@@ -396,10 +436,19 @@
       const content = txt(item.querySelector(":scope > .comment-inner-container .content"));
       const nickname = txt(item.querySelector(":scope > .comment-inner-container .author .name"));
       const avatarEl = item.querySelector(":scope > .comment-inner-container .avatar img");
-      const avatar = imgUrl((avatarEl && (avatarEl.currentSrc || avatarEl.src)) || "");
+      const avatar = imageCandidates(avatarEl)[0] || "";
       const likeCount = txt(item.querySelector(":scope > .comment-inner-container .interactions .count"));
       const createTime = txt(item.querySelector(":scope > .comment-inner-container .location"));
-      return { id: item.id || "", content, likeCount, createTime, nickname, avatar, sub: [] };
+      const images = [];
+      const seen = new Set();
+      item.querySelectorAll(":scope > .comment-inner-container img").forEach((img) => {
+        if (img.closest(".avatar")) return;
+        imageCandidates(img).forEach((url) => {
+          const key = url.replace(/[?#].*$/, "");
+          if (!seen.has(key)) { seen.add(key); images.push(url); }
+        });
+      });
+      return { id: item.id || "", content, likeCount, createTime, nickname, avatar, images, sub: [] };
     };
     // 回复容器是顶级 .comment-item 的兄弟节点，不是其子节点。
     const comments = Array.from(root.querySelectorAll(":scope .parent-comment")).map((parent) => {
@@ -474,6 +523,7 @@
           createTime: relTime(node.createTime !== undefined ? node.createTime : node.create_time),
           nickname: String(ui.nickname || ui.nick_name || ""),
           avatar: imgUrl(ui.avatar || ""),
+          images: imageListFrom(node, 4),
           sub: subs
         });
         return; // 评论对象内部不再下钻（userInfo/subComments 已单独处理）
@@ -890,6 +940,8 @@ html.xhs-cx-light #xhs-cx-root {
 .xhs-cx-tag { display: inline-block; padding: 2px 9px; margin: 3px 6px 0 0; border-radius: 999px; font-size: 11.5px; background: var(--xhs-think); border: 1px solid var(--xhs-border); color: var(--xhs-muted); }
 .xhs-cx-images { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
 .xhs-cx-images img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; border: 1px solid var(--xhs-border); cursor: zoom-in; }
+.xhs-cx-cmt-images { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 7px; margin-top: 9px; max-width: 430px; }
+.xhs-cx-cmt-images img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 7px; border: 1px solid var(--xhs-border); cursor: zoom-in; }
 .xhs-cx-card .xhs-open { margin-top: 10px; font-size: 12px; color: var(--xhs-accent); }
 
 /* —— 详情页 —— */
@@ -1051,7 +1103,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     railEl = document.createElement("aside");
     railEl.className = "xhs-cx-rail";
     railEl.innerHTML =
-      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.4.0</span></div>' +
+      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.5.0</span></div>' +
       '<button class="xhs-cx-new" id="xhs-cx-new">' + ICONS.plus + '<span>新建会话</span></button>' +
       '<div class="xhs-cx-sessions" id="xhs-cx-sessions"></div>' +
       '<div class="xhs-cx-rail-login"><button id="xhs-cx-login-btn" title="登录小红书后才能打开笔记详情">未登录 · 点击登录</button></div>' +
@@ -1207,12 +1259,17 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
       ? '<div class="xhs-cx-avatar"><img src="' + escapeHtml(c.avatar) + '" onerror="this.remove()"></div>'
       : '<div class="xhs-cx-avatar">' + escapeHtml((c.nickname || "?").charAt(0)) + '</div>';
     const subs = (c.sub || []).map((s) => commentHtml(s, depth + 1)).join("");
+    const images = (c.images || []).length
+      ? '<div class="xhs-cx-cmt-images">' + c.images.map((u) =>
+        '<img loading="lazy" src="' + escapeHtml(u) + '" data-lb="' + escapeHtml(u) + '" onerror="this.remove()">').join("") + '</div>'
+      : "";
     return '<div class="xhs-cx-cmt" style="margin-left:' + Math.min(depth * 20, 60) + 'px">' +
       avatar +
       '<div class="xhs-cx-cmt-body">' +
         '<div class="xhs-cx-cmt-hd">' + escapeHtml(c.nickname || "匿名用户") +
           (c.createTime ? ' · ' + escapeHtml(c.createTime) : "") + '</div>' +
         '<div class="xhs-cx-cmt-content">' + escapeHtml(c.content || "") + '</div>' +
+        images +
         '<div class="xhs-cx-cmt-meta">' + (c.likeCount && c.likeCount !== "0" ? '赞 ' + escapeHtml(c.likeCount) : "") + '</div>' +
         subs +
       '</div>' +
@@ -1738,7 +1795,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     settingsEl.innerHTML =
       '<div class="xhs-cx-settings-card">' +
         '<h3>Codex 外观设置</h3>' +
-        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.4.0 — 评论按需、受控加载</div>' +
+        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.5.0 — 图片完整读取，评论按需加载</div>' +
         '<div class="xhs-cx-row"><label>主题</label><select id="s-theme">' +
           '<option value="dark">深色</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></div>' +
         '<div class="xhs-cx-row"><label>伪装（Codex 品牌 / 标题 / 图标）</label><input type="checkbox" id="s-stealth"></div>' +
