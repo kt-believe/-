@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书 · Codex 外观
 // @namespace    https://www.xiaohongshu.com/
-// @version      2.6.0
-// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持图片灯箱、列表位置恢复、分批加载和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
+// @version      2.7.0
+// @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持图片灯箱、列表位置恢复、常驻加载更多和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
 // @author       doubao
 // @match        https://www.xiaohongshu.com/*
 // @noframes
@@ -56,6 +56,13 @@
   const SETTINGS_KEY = "xhs:codex:settings";
   const LIST_VIEW_KEY = "xhs:codex:list-view:v1";
   const LIST_PAGE_SIZE = 30;
+  // 刷新代表一次新的列表浏览：不沿用上一轮“加载更多”的条数。
+  try {
+    const nav = performance.getEntriesByType && performance.getEntriesByType("navigation")[0];
+    if ((nav && nav.type === "reload") || (!nav && performance.navigation && performance.navigation.type === 1)) {
+      sessionStorage.removeItem(LIST_VIEW_KEY);
+    }
+  } catch { /* ignore */ }
   let SETTINGS = null;
 
   function loadSettings() {
@@ -776,6 +783,9 @@ html.xhs-cx.xhs-cx-overlay #app {
   visibility: visible !important;
   position: static !important;
 }
+/* 点击“加载更多”时短暂让原生 feed 参与布局，以触发它自己的下一页懒加载；仍完全被 Codex 层遮住。 */
+html.xhs-cx.xhs-cx-feed-loading, html.xhs-cx.xhs-cx-feed-loading body { overflow: visible !important; scrollbar-width: none !important; }
+html.xhs-cx.xhs-cx-feed-loading #app { display: block !important; visibility: hidden !important; position: static !important; }
 html.xhs-cx-light, html.xhs-cx-light body { background: #f7f7f8 !important; }
 
 #xhs-cx-root {
@@ -1136,7 +1146,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     railEl = document.createElement("aside");
     railEl.className = "xhs-cx-rail";
     railEl.innerHTML =
-      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.6.0</span></div>' +
+      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.7.0</span></div>' +
       '<button class="xhs-cx-new" id="xhs-cx-new">' + ICONS.plus + '<span>新建会话</span></button>' +
       '<div class="xhs-cx-sessions" id="xhs-cx-sessions"></div>' +
       '<div class="xhs-cx-rail-login"><button id="xhs-cx-login-btn" title="登录小红书后才能打开笔记详情">未登录 · 点击登录</button></div>' +
@@ -1335,10 +1345,10 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
       flowEl.appendChild(elFrom(toolLine("search_notes", '{ query: "' + short(n.title, 14) + '", limit: 1 }')));
       flowEl.appendChild(elFrom(noteCardHtml(n)));
     });
-    const more = notes.length > list.length
-      ? '<span style="display:block;margin-top:12px"><button class="xhs-cx-backlink" data-list-load="1">加载更多（再显示 ' + Math.min(LIST_PAGE_SIZE, notes.length - list.length) + ' 条）</button></span>'
-      : '';
-    flowEl.appendChild(elFrom('<div class="xhs-cx-fin">完成 · ' + list.length + ' / ' + notes.length + ' 条 · ' + (Math.random() * 1.5 + 0.8).toFixed(1) + 's' + more + '</div>'));
+    const nextCount = Math.min(LIST_PAGE_SIZE, Math.max(0, notes.length - list.length));
+    const more = '<span style="display:block;margin-top:12px"><button class="xhs-cx-backlink" data-list-load="1">加载更多' +
+      (nextCount ? '（再显示 ' + nextCount + ' 条）' : '（请求下一批 30 条）') + '</button></span>';
+    flowEl.appendChild(elFrom('<div class="xhs-cx-fin">完成 · ' + list.length + ' / 当前已获取 ' + notes.length + ' 条 · ' + (Math.random() * 1.5 + 0.8).toFixed(1) + 's' + more + '</div>'));
   }
   function renderDetail(note, comments, commentCount, hasMore) {
     const id = note ? note.id : (currentRoute().id || "");
@@ -1845,7 +1855,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     settingsEl.innerHTML =
       '<div class="xhs-cx-settings-card">' +
         '<h3>Codex 外观设置</h3>' +
-        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.6.0 — 列表位置恢复，评论按需加载</div>' +
+        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.7.0 — 常驻加载更多，评论按需加载</div>' +
         '<div class="xhs-cx-row"><label>主题</label><select id="s-theme">' +
           '<option value="dark">深色</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></div>' +
         '<div class="xhs-cx-row"><label>伪装（Codex 品牌 / 标题 / 图标）</label><input type="checkbox" id="s-stealth"></div>' +
@@ -1916,6 +1926,42 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     toast(v ? "已暂停伪装，显示原页面" : "已恢复伪装");
   }
 
+  /* —— 推荐列表按需加载 —— */
+  let feedLoadTimer = null, lastManualFeedLoad = 0;
+  function loadOneFeedBatch() {
+    const route = currentRoute();
+    if (route.kind !== "feed") return;
+    const now = Date.now();
+    const wait = 1200 - (now - lastManualFeedLoad);
+    if (wait > 0) { toast("正在加载，请稍候…"); return; }
+    lastManualFeedLoad = now;
+    const before = domNotes().length;
+    const saved = readListView(route);
+    const visible = Math.max(LIST_PAGE_SIZE, Number(saved && saved.visible) || LIST_PAGE_SIZE) + LIST_PAGE_SIZE;
+    const top = scrollEl ? scrollEl.scrollTop : 0;
+    document.documentElement.classList.add("xhs-cx-feed-loading");
+    try {
+      // 只触发小红书页面自身的推荐流懒加载，不调用私有接口。
+      const feed = document.querySelector(".exploreFeeds, .feeds-container, [class*='feeds']");
+      if (feed) {
+        feed.scrollTop = feed.scrollHeight;
+        feed.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+      window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+      window.dispatchEvent(new Event("scroll"));
+    } catch { /* ignore */ }
+    clearTimeout(feedLoadTimer);
+    feedLoadTimer = setTimeout(() => {
+      feedLoadTimer = null;
+      document.documentElement.classList.remove("xhs-cx-feed-loading");
+      const after = domNotes().length;
+      saveListView(route, visible, top);
+      pendingScrollRestore = top;
+      render();
+      toast(after > before ? "已加载下一批推荐" : "已请求下一批推荐；如无新增可稍后再试");
+    }, 1600);
+  }
+
   /* ============================== 事件绑定 ============================== */
   function bindEvents() {
     document.addEventListener("click", (e) => {
@@ -1930,13 +1976,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
       const listLoad = e.target.closest && e.target.closest("[data-list-load]");
       if (listLoad) {
         e.preventDefault();
-        const route = currentRoute();
-        const saved = readListView(route);
-        const visible = Math.max(LIST_PAGE_SIZE, Number(saved && saved.visible) || LIST_PAGE_SIZE) + LIST_PAGE_SIZE;
-        const top = scrollEl ? scrollEl.scrollTop : 0;
-        saveListView(route, visible, top);
-        pendingScrollRestore = top;
-        render();
+        loadOneFeedBatch();
         return;
       }
       const lg = e.target.closest && e.target.closest("[data-open-login]");
