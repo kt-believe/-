@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书 · Codex 外观
 // @namespace    https://www.xiaohongshu.com/
-// @version      2.5.0
+// @version      2.5.2
 // @description  把小红书网页版（www.xiaohongshu.com）伪装成 OpenAI Codex 桌面应用外观：左侧会话栏 + 中间对话流 + 右侧代码面板。笔记流与详情页均以页面 DOM 为优先数据源；支持全部主图、评论图片灯箱和受控评论加载；带 xsec_token 的真实跳转、应急伪装键和设置面板。
 // @author       doubao
 // @match        https://www.xiaohongshu.com/*
@@ -191,13 +191,15 @@
   /** 小红书图片会在 src、data-src、srcset 或 Vue 的懒加载属性间切换；统一取候选。 */
   function imageCandidates(node) {
     if (!node) return [];
-    const attrs = ["currentSrc", "src", "data-src", "data-origin", "data-original", "data-url", "data-image", "data-lazy-src", "data-raw", "href"];
+    // 同一张图常同时携带缩略图、原图与 srcset；优先选原图/懒加载地址，只返回一个。
+    const attrs = ["data-origin", "data-original", "data-raw", "data-src", "data-lazy-src", "currentSrc", "src", "data-url", "data-image", "href"];
     const out = [];
     const add = (value) => {
-      if (!value) return;
+      if (!value || out.length) return;
       String(value).split(",").forEach((part) => {
+        if (out.length) return;
         const url = imgUrl(part.trim().split(/\s+/)[0]);
-        if (url && !out.includes(url)) out.push(url);
+        if (url) out.push(url);
       });
     };
     for (const key of attrs) {
@@ -211,7 +213,7 @@
     const add = (u) => {
       const url = imgUrl(u);
       // 只按原始文件路径去重，保留同一图片不同 CDN 参数时的第一份。
-      const key = url.replace(/[?#].*$/, "");
+      const key = url.replace(/^https?:\/\//i, "").replace(/[?#].*$/, "");
       if (url && !seen.has(key)) { seen.add(key); out.push(url); }
     };
     const walk = (node, d) => {
@@ -219,11 +221,18 @@
       if (typeof node === "string") { add(node); return; }
       if (Array.isArray(node)) { node.forEach((x) => walk(x, d + 1)); return; }
       if (typeof node !== "object") return;
-      ["urlDefault", "urlPre", "url", "src", "originUrl", "originalUrl", "imageUrl", "image_url", "masterUrl"].forEach((k) => add(node[k]));
+      // 一个图片对象的多个 URL 只是同一张图的不同清晰度，不能全部加入画廊。
+      const best = ["originUrl", "originalUrl", "masterUrl", "urlDefault", "urlPre", "imageUrl", "image_url", "url", "src"]
+        .map((k) => node[k]).find(Boolean);
+      add(best);
       ["imageList", "image_list", "images", "pictures", "pictureList", "imageInfo", "image_info", "image", "urlInfoList", "url_info_list"].forEach((k) => walk(node[k], d + 1));
     };
     walk(value, 0);
     return out;
+  }
+  function imageKey(url) {
+    // 同一资源可能以 http/https 或不同裁剪参数出现；它们不应重复显示。
+    return imgUrl(url).replace(/^https?:\/\//i, "").replace(/[?#].*$/, "");
   }
 
   /* ============================== 读取页面数据 ============================== */
@@ -412,10 +421,11 @@
     // Swiper 为无缝轮播复制首尾图片，按 URL 去重并跳过头像/评论图片。
     box.querySelectorAll(".media-container img, .note-slider img, .swiper img").forEach((img) => {
       if (img.closest(".author, .comments-container")) return;
-      imageCandidates(img).forEach((url) => {
-        const key = url.replace(/[?#].*$/, "");
-        if (!seen.has(key)) { seen.add(key); images.push(url); }
-      });
+      // Swiper 会为首尾轮播页制造 DOM 副本，副本不能当成新图片。
+      if (img.closest(".swiper-slide-duplicate, [data-swiper-slide-duplicate='true']")) return;
+      const url = imageCandidates(img)[0];
+      const key = imageKey(url);
+      if (url && !seen.has(key)) { seen.add(key); images.push(url); }
     });
     const tags = Array.from(box.querySelectorAll(".detail-desc #hash-tag, .note-content .tag"))
       .map((el) => txt(el).replace(/^#/, "")).filter(Boolean);
@@ -441,12 +451,10 @@
       const createTime = txt(item.querySelector(":scope > .comment-inner-container .location"));
       const images = [];
       const seen = new Set();
-      item.querySelectorAll(":scope > .comment-inner-container img").forEach((img) => {
-        if (img.closest(".avatar")) return;
-        imageCandidates(img).forEach((url) => {
-          const key = url.replace(/[?#].*$/, "");
-          if (!seen.has(key)) { seen.add(key); images.push(url); }
-        });
+      item.querySelectorAll(":scope > .comment-inner-container .comment-picture img, :scope > .comment-inner-container [class*='comment-picture'] img, :scope > .comment-inner-container .comment-image img, :scope > .comment-inner-container [class*='comment-image'] img").forEach((img) => {
+        const url = imageCandidates(img)[0];
+        const key = imageKey(url);
+        if (url && !seen.has(key)) { seen.add(key); images.push(url); }
       });
       return { id: item.id || "", content, likeCount, createTime, nickname, avatar, images, sub: [] };
     };
@@ -1103,7 +1111,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     railEl = document.createElement("aside");
     railEl.className = "xhs-cx-rail";
     railEl.innerHTML =
-      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.5.0</span></div>' +
+      '<div class="xhs-cx-brand">' + ICONS.sparkle + '<b></b><span>v2.5.2</span></div>' +
       '<button class="xhs-cx-new" id="xhs-cx-new">' + ICONS.plus + '<span>新建会话</span></button>' +
       '<div class="xhs-cx-sessions" id="xhs-cx-sessions"></div>' +
       '<div class="xhs-cx-rail-login"><button id="xhs-cx-login-btn" title="登录小红书后才能打开笔记详情">未登录 · 点击登录</button></div>' +
@@ -1795,7 +1803,7 @@ html.xhs-cx-light .xhs-cx-panel-body pre { color: #3a3a44; }
     settingsEl.innerHTML =
       '<div class="xhs-cx-settings-card">' +
         '<h3>Codex 外观设置</h3>' +
-        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.5.0 — 图片完整读取，评论按需加载</div>' +
+        '<div class="xhs-cx-sc-sub">小红书 · 伪装脚本 v2.5.2 — 图片精确去重，评论按需加载</div>' +
         '<div class="xhs-cx-row"><label>主题</label><select id="s-theme">' +
           '<option value="dark">深色</option><option value="light">浅色</option><option value="auto">跟随系统</option></select></div>' +
         '<div class="xhs-cx-row"><label>伪装（Codex 品牌 / 标题 / 图标）</label><input type="checkbox" id="s-stealth"></div>' +
